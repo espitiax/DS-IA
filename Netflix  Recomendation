@@ -1,0 +1,77 @@
+from __future__ import print_function
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from sklearn.preprocessing import MinMaxScaler
+
+# Load the datasets
+users = pd.read_csv('/content/drive/My Drive/Colab Notebooks/ml-100k/u.user', sep='|', names=['user_id', 'age', 'sex', 'occupation', 'zip_code'])
+ratings = pd.read_csv('/content/drive/My Drive/Colab Notebooks/ml-100k/u.data', sep='\t', names=['user_id', 'movie_id', 'rating', 'unix_timestamp'], encoding='latin-1')
+movies = pd.read_csv('/content/drive/My Drive/Colab Notebooks/ml-100k/u.item', sep='|', names=['movie_id', 'title', 'release_date', 'video_release_date', 'imdb_url'] + [
+    "genre_unknown", "Action", "Adventure", "Animation", "Children", "Comedy",
+    "Crime", "Documentary", "Drama", "Fantasy", "Film-Noir", "Horror",
+    "Musical", "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western"], encoding='latin-1').drop(columns=['release_date', 'video_release_date', 'imdb_url'])
+
+# Split the data
+def split_dataframe(df, holdout_fraction=0.1):
+    test = df.sample(frac=0.1, replace=False)
+    return df[~df.index.isin(test.index)], test
+
+# Build the sparse ratings matrix
+def build_rating_sparse_tensor(ratings_df):
+    return tf.SparseTensor(indices=ratings_df[['user_id', 'movie_id']].values, values=ratings_df['rating'].values, dense_shape=(users.shape[0], movies.shape[0]))
+
+# Define the model
+class Model:
+    def __init__(self, embedding_vars, loss, metrics=None):
+        self.embedding_vars = embedding_vars
+        self.loss = loss
+        self.metrics = metrics
+        self.embeddings = {k: None for k in embedding_vars}
+        self.session = None
+
+    @tf.function
+    def train(self, num_iterations=100, learning_rate=1.0, optimizer=tf.keras.optimizers.SGD):
+        train_op = optimizer(learning_rate).minimize(self.loss)
+        local_init_op = tf.group(tf.compat.v1.variables_initializer(optimizer(learning_rate).variables()), tf.compat.v1.local_variables_initializer())
+        
+        if self.session is None:
+            self.session = tf.compat.v1.Session()
+
+        with self.session.as_default():
+            self.session.run([tf.compat.v1.global_variables_initializer(), tf.compat.v1.tables_initializer()])
+            local_init_op.run()
+            for i in range(num_iterations + 1):
+                self.session.run(train_op)
+                if i % 100 == 0:
+                    print(f"Iteration {i}: loss = {self.session.run(self.loss)}")
+
+    def embeddings(self):
+        return self.embeddings
+
+# Compute the embedding scores
+def userRecommendation(model, userID):
+    userEmbedding = model.embeddings['user_id'][userID]
+    movieEmbedding = model.embeddings['movie_id']
+    scores = userEmbedding.dot(movieEmbedding.T)
+    df = pd.DataFrame({'SCORE': list(scores), 'MOVIE': movies['movie_id'], 'TITLE': movies['title']})
+    return display.display(df.sort_values('SCORE', ascending=False).head(5)), df
+
+# Build and train the model
+def build_model(ratings, embedding_dim=3, regularization_coeff=0.1, init_stddev=0.1):
+    train_ratings, test_ratings = split_dataframe(ratings)
+    vectorU = tf.Variable(tf.random.normal([build_rating_sparse_tensor(train_ratings).dense_shape[0], embedding_dim], stddev=init_stddev))
+    vectorV = tf.Variable(tf.random.normal([build_rating_sparse_tensor(train_ratings).dense_shape[1], embedding_dim], stddev=init_stddev))
+    train_loss = tf.losses.mean_squared_error(build_rating_sparse_tensor(train_ratings).values, tf.gather_nd(tf.matmul(vectorU, vectorV, transpose_b=True), build_rating_sparse_tensor(train_ratings).indices))
+    test_loss = tf.losses.mean_squared_error(build_rating_sparse_tensor(test_ratings).values, tf.gather_nd(tf.matmul(vectorU, vectorV, transpose_b=True), build_rating_sparse_tensor(test_ratings).indices))
+    feedbackLoss = train_loss + (regularization_coeff * (tf.reduce_sum(tf.abs(vectorU)) / vectorU.shape[0] + tf.reduce_sum(tf.abs(vectorV)) / vectorV.shape[0]))
+    return Model({"user_id": vectorU, "movie_id": vectorV}, feedbackLoss)
+
+# Train the model
+model = build_model(ratings, embedding_dim=5, regularization_coeff=0.1, init_stddev=0.1)
+model.train(num_iterations=2000, learning_rate=1.0)
+
+# Recommendation
+user = 500
+print('Top 5 movie recommendation for User {}: '.format(user))
+df2, df_F = userRecommendation(model, user)
